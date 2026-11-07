@@ -1,30 +1,46 @@
 # Qui
 
-Selector de cuentas SSH y GitHub CLI. Detecta los perfiles Trabajo y Personal existentes y permite guardar cuentas adicionales desde la aplicación.
+Qui is a small Linux desktop app for switching the GitHub SSH account used by Git and GitHub CLI (`gh`). It detects the existing Work and Personal profiles and lets you add more accounts.
 
-## Requisitos
+## Features
 
-- Rust 1.85 o posterior y Cargo.
-- `git` y GitHub CLI (`gh`).
-- Las identidades de commit siguen usando las reglas `includeIf` configuradas en Git.
-- Kitty para abrir autenticación de `gh` y la creación interactiva de claves; `x-terminal-emulator` sirve como alternativa.
-- En Linux, un portal XDG de archivos (GTK, GNOME o KDE) para elegir claves existentes y rutas de destino.
+- Switch the GitHub SSH key used by `git@github.com` without `-work` or `-personal` URL suffixes.
+- Add profiles with an existing SSH key or create an Ed25519 key from the app.
+- Copy the public key so you can add it to GitHub.
+- Check the active `gh` login.
+- Keep Git commit author identity controlled by your existing directory-specific Git configuration.
 
-## Ejecutar
+## Requirements
+
+- Linux x86_64.
+- `git`, GitHub CLI (`gh`), OpenSSH (`ssh` and `ssh-keygen`).
+- Kitty to open interactive `gh` sign-in and key creation; `x-terminal-emulator` is used when available as a fallback.
+- An XDG file picker portal (GTK, GNOME, or KDE) for selecting an existing key or destination.
+
+## Run
+
+Download `Qui-x86_64.AppImage` from the [latest release](https://github.com/gsanmartindougan/qui/releases/latest), then:
+
+```sh
+chmod +x Qui-x86_64.AppImage
+./Qui-x86_64.AppImage
+```
+
+For development, install Rust and run:
 
 ```sh
 cargo run
 ```
 
-En Linux x86-64 también puedes iniciar el binario [Qui](outputs/qui-linux-x86_64).
+## Add an account
 
-Qui detecta los perfiles Trabajo y Personal a partir de las reglas `includeIf` y los alias SSH existentes. Desde **Añadir cuenta** puedes guardar un login de GitHub y seleccionar una clave privada existente o crear una clave Ed25519 con `ssh-keygen` en Kitty. La clave privada permanece local. Tras guardar, Qui muestra el archivo `.pub` y permite copiar su línea pública completa para pegarla en GitHub. Los perfiles añadidos se guardan en `$XDG_CONFIG_HOME/qui/profiles.json` (o `~/.config/qui/profiles.json`).
+Choose **Add account**, enter a display name and the account's GitHub username, then select an existing private SSH key or create an Ed25519 key. Qui keeps the private key local and displays the `.pub` key so you can copy it to GitHub. Profiles are stored in `$XDG_CONFIG_HOME/qui/profiles.json` (usually `~/.config/qui/profiles.json`).
 
-Al activar un perfil, Qui configura `github.com` con su clave y hace que Git normalice remotos de GitHub con alias al host canónico `git@github.com:`. Añade una línea `Include` a `~/.ssh/config` y un `include.path` global de Git hacia los archivos administrados bajo `$XDG_CONFIG_HOME/qui/` (o `~/.config/qui/`). No cambia `user.name`, `user.email`, URLs remotas guardadas ni credenciales; los sufijos `-work` y `-personal` no aparecen en las URLs efectivas. Las credenciales de `gh` siguen administradas por GitHub CLI. Si falta iniciar sesión, Qui intenta abrir Kitty y usa `x-terminal-emulator` como alternativa. Después, activa de nuevo el perfil para refrescar su estado.
+When you activate a profile, Qui configures SSH for `github.com` and Git to normalize GitHub remotes to `git@github.com:`. It adds an `Include` to `~/.ssh/config` and a global Git include for managed configuration files under `$XDG_CONFIG_HOME/qui/` (usually `~/.config/qui/`). It does not change `user.name`, `user.email`, saved remote URLs, or `gh` credentials. GitHub CLI authentication remains managed by `gh`.
 
-## Comprobar la cuenta activa
+## Check the active accounts
 
-Dentro de un repositorio, ejecuta:
+Run these commands inside a repository:
 
 ```sh
 git remote get-url origin
@@ -34,8 +50,8 @@ gh api user --jq .login
 git var GIT_AUTHOR_IDENT
 ```
 
-El remoto efectivo debería usar `git@github.com:` sin sufijo. El saludo de SSH indica qué cuenta tiene la clave seleccionada; `gh api` indica el usuario activo de `gh`. `git var` muestra por separado la identidad de autor que corresponde al directorio. Git expande las reglas `insteadOf` al mostrar `git remote get-url`.
+The SSH greeting identifies the GitHub account selected by the active key. `gh api` shows the account currently authenticated in `gh`. `git var` shows the commit author identity for the current directory; it is separate from the SSH and `gh` accounts.
 
-Para revertir Qui, elimina de `~/.ssh/config` su línea `Include` y de la configuración global de Git el `include.path` que apunta a `ssh-profile.gitconfig`; después puedes borrar los dos archivos administrados en `$XDG_CONFIG_HOME/qui/`.
+## Undo Qui's Git and SSH configuration
 
-El cambio de SSH es independiente del inicio de sesión de `gh`: Qui puede dejar SSH cambiado y mostrar que `gh` no pudo cambiar de cuenta. La identidad de autor de commits sigue dependiendo de las reglas `includeIf` actuales.
+Remove Qui's `Include` line from `~/.ssh/config` and the global Git `include.path` pointing to `ssh-profile.gitconfig`. You can then delete the managed files in `$XDG_CONFIG_HOME/qui/` (usually `~/.config/qui/`). Your keys and GitHub CLI credentials are not deleted by this cleanup.
