@@ -1,15 +1,21 @@
 # Qui
 
-Qui is a small Linux desktop app for switching the GitHub SSH account used by Git and GitHub CLI (`gh`). It detects the existing Work and Personal profiles and lets you add more accounts.
+Qui is a small Linux desktop app for managing account profiles and choosing which GitHub SSH key to use with Git. You can add profiles in the app and check the account currently signed in to GitHub CLI (`gh`).
 
 ## Features
 
-- Switch the GitHub SSH key used by `git@github.com` without `-work` or `-personal` URL suffixes.
+- Switch the SSH key used for GitHub repositories.
 - Add profiles with an existing SSH key or create an Ed25519 key from the app.
 - Copy the public key so you can add it to GitHub.
 - Check the active `gh` login.
 - Use the interface in Spanish or English, with the system language detected automatically and a saved in-app switch.
 - Keep Git commit author identity controlled by your existing directory-specific Git configuration.
+
+## Import existing profiles
+
+Qui can import existing **Work** and **Personal** profiles when your Git `includeIf` rules or config file paths contain `work` or `personal`, and your SSH config has a matching host alias with an identity key. This automatic import depends on those naming conventions; it does not discover arbitrary existing Git or SSH profiles. You can add other accounts from **Add account**.
+
+When you activate a profile, Qui configures its SSH key for `github.com` and switches `gh` when that profile has a linked login. The credentials themselves remain managed by `gh`.
 
 ## Requirements
 
