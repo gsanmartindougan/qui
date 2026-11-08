@@ -15,12 +15,22 @@ script:
 
     cargo build --release --locked
 
-    install -Dm755 target/release/qui "$TARGET_APPDIR/usr/bin/qui"
-    install -Dm644 design/qui-icon.png \
-      "$TARGET_APPDIR/usr/share/icons/hicolor/512x512/apps/qui.png"
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: io.github.gsanmartindougan.qui
+    name: Qui
+    icon: qui
+    version: 0.2.0
+    exec: usr/bin/qui
+    exec_args: $@
+  after_bundle: |
+    install -Dm755 target/release/qui "$APPDIR/usr/bin/qui"
+    install -Dm644 packaging/qui-icon.png \
+      "$APPDIR/usr/share/icons/hicolor/512x512/apps/qui.png"
 
-    mkdir -p "$TARGET_APPDIR/usr/share/applications"
-    cat > "$TARGET_APPDIR/usr/share/applications/io.github.gsanmartindougan.qui.desktop" <<'DESKTOP'
+    mkdir -p "$APPDIR/usr/share/applications"
+    cat > "$APPDIR/usr/share/applications/io.github.gsanmartindougan.qui.desktop" <<'DESKTOP'
     [Desktop Entry]
     Version=1.0
     Type=Application
@@ -30,16 +40,6 @@ script:
     Categories=Development;Utility;
     Terminal=false
     DESKTOP
-
-AppDir:
-  path: ./AppDir
-  app_info:
-    id: io.github.gsanmartindougan.qui
-    name: Qui
-    icon: qui
-    version: 0.1.0
-    exec: usr/bin/qui
-    exec_args: $@
   apt:
     arch: [amd64]
     sources:
@@ -81,32 +81,22 @@ AppDir:
       - usr/share/man
       - usr/lib/x86_64-linux-gnu/libxkbcommon.so*
       - usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so*
-  runtime:
-    arch: [x86_64]
   test:
     ubuntu-20-04:
       image: ubuntu:20.04
-      before_command: [bash, -lc, 'apt-get update && apt-get install -y xkb-data libxkbcommon0 libxkbcommon-x11-0']
-      command: "bash -lc 'timeout 10s ./AppRun; code=$?; [ \"$code\" -eq 124 ]'"
-      use_host_x: true
+      command: "bash -lc 'apt-get update && apt-get install -y xvfb xkb-data libxkbcommon0 libxkbcommon-x11-0; Xvfb :99 -screen 0 1024x768x24 >/tmp/xvfb.log 2>&1 & xvfb_pid=$!; sleep 1; export DISPLAY=:99 LD_LIBRARY_PATH=/app/usr/lib/x86_64-linux-gnu:/app/lib/x86_64-linux-gnu:/app/opt/libc/lib/x86_64-linux-gnu; timeout 10s /app/usr/bin/qui; code=$?; kill $xvfb_pid; [ \"$code\" -eq 124 ]'"
     fedora-30:
       image: appimagecrafters/tests-env:fedora-30
-      before_command: [bash, -lc, 'dnf install -y xkeyboard-config libxkbcommon libxkbcommon-x11']
-      command: "bash -lc 'timeout 10s ./AppRun; code=$?; [ \"$code\" -eq 124 ]'"
-      use_host_x: true
+      command: "bash -lc 'dnf install -y xorg-x11-server-Xvfb xkeyboard-config libxkbcommon libxkbcommon-x11; Xvfb :99 -screen 0 1024x768x24 >/tmp/xvfb.log 2>&1 & xvfb_pid=$!; sleep 1; export DISPLAY=:99 LD_LIBRARY_PATH=/app/usr/lib/x86_64-linux-gnu:/app/lib/x86_64-linux-gnu:/app/opt/libc/lib/x86_64-linux-gnu; timeout 10s /app/usr/bin/qui; code=$?; kill $xvfb_pid; [ \"$code\" -eq 124 ]'"
     debian-stable:
-      image: appimagecrafters/tests-env:debian-stable
-      command: "bash -lc 'timeout 10s ./AppRun; code=$?; [ \"$code\" -eq 124 ]'"
-      use_host_x: true
+      image: debian:bookworm
+      command: "bash -lc 'apt-get update && apt-get install -y xvfb xkb-data libxkbcommon0 libxkbcommon-x11-0; Xvfb :99 -screen 0 1024x768x24 >/tmp/xvfb.log 2>&1 & xvfb_pid=$!; sleep 1; export DISPLAY=:99 LD_LIBRARY_PATH=/app/usr/lib/x86_64-linux-gnu:/app/lib/x86_64-linux-gnu:/app/opt/libc/lib/x86_64-linux-gnu; timeout 10s /app/usr/bin/qui; code=$?; kill $xvfb_pid; [ \"$code\" -eq 124 ]'"
     arch:
       image: archlinux:latest
-      before_command: [bash, -lc, 'pacman -Sy --noconfirm xkeyboard-config libxkbcommon libxkbcommon-x11']
-      command: "bash -lc 'timeout 10s ./AppRun; code=$?; [ \"$code\" -eq 124 ]'"
-      use_host_x: true
+      command: "bash -lc 'pacman -Sy --noconfirm xorg-server-xvfb xkeyboard-config libxkbcommon libxkbcommon-x11; Xvfb :99 -screen 0 1024x768x24 >/tmp/xvfb.log 2>&1 & xvfb_pid=$!; sleep 1; export DISPLAY=:99 LD_LIBRARY_PATH=/app/usr/lib/x86_64-linux-gnu:/app/lib/x86_64-linux-gnu:/app/opt/libc/lib/x86_64-linux-gnu; timeout 10s /app/usr/bin/qui; code=$?; kill $xvfb_pid; [ \"$code\" -eq 124 ]'"
       env:
         XDG_RUNTIME_DIR: /tmp
         LC_ALL: C.UTF-8
 
 AppImage:
   arch: x86_64
-  file_name: Qui-x86_64.AppImage

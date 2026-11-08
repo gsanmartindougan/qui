@@ -8,6 +8,7 @@ Qui is a small Linux desktop app for switching the GitHub SSH account used by Gi
 - Add profiles with an existing SSH key or create an Ed25519 key from the app.
 - Copy the public key so you can add it to GitHub.
 - Check the active `gh` login.
+- Use the interface in Spanish or English, with the system language detected automatically and a saved in-app switch.
 - Keep Git commit author identity controlled by your existing directory-specific Git configuration.
 
 ## Requirements

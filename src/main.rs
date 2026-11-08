@@ -21,13 +21,77 @@ const ERROR: Color = Color::from_rgb(0.706, 0.137, 0.094);
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
-        .title("Qui · cuentas Git")
+        .title("Qui")
         .window_size(Size::new(430.0, 610.0))
         .resizable(false)
         .centered()
         .theme(|_: &App| Theme::Light)
         .subscription(App::subscription)
         .run()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Language {
+    Spanish,
+    English,
+}
+
+fn tr(language: Language, spanish: &'static str, english: &'static str) -> &'static str {
+    match language {
+        Language::Spanish => spanish,
+        Language::English => english,
+    }
+}
+
+fn system_language() -> Language {
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+    if locale.to_ascii_lowercase().starts_with("es") {
+        Language::Spanish
+    } else {
+        Language::English
+    }
+}
+
+fn load_language() -> Language {
+    match config_dir()
+        .and_then(|directory| fs::read_to_string(directory.join("language")).ok())
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("es") => Language::Spanish,
+        Some("en") => Language::English,
+        _ => system_language(),
+    }
+}
+
+fn save_language(language: Language) -> Result<(), String> {
+    let directory = config_dir().ok_or(tr(
+        language,
+        "No encuentro tu directorio de configuración.",
+        "Could not find your configuration directory.",
+    ))?;
+    fs::create_dir_all(&directory).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(language, "No pude crear", "Could not create"),
+            directory.display()
+        )
+    })?;
+    let path = directory.join("language");
+    let value = match language {
+        Language::Spanish => b"es".as_slice(),
+        Language::English => b"en".as_slice(),
+    };
+    atomic_write(&path, value).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(language, "No pude guardar", "Could not save"),
+            path.display()
+        )
+    })
 }
 
 fn brand_logo() -> Element<'static, Message> {
@@ -56,6 +120,7 @@ fn brand_logo() -> Element<'static, Message> {
 #[derive(Debug, Clone)]
 enum Message {
     EscapePressed,
+    ToggleLanguage,
     Activate(String),
     SwitchFinished(SwitchOutcome),
     StartLogin,
@@ -87,6 +152,7 @@ enum Screen {
 }
 
 struct App {
+    language: Language,
     profiles: Vec<Profile>,
     accounts: Vec<GhAccount>,
     active_profile: Option<String>,
@@ -162,12 +228,14 @@ struct SwitchOutcome {
 
 impl App {
     fn new() -> Self {
-        match load_profiles() {
+        let language = load_language();
+        match load_profiles(language) {
             Ok(mut profiles) => {
                 let accounts = load_gh_accounts();
                 map_gh_accounts(&mut profiles, &accounts);
                 let active_profile = read_active_profile(&profiles, &accounts);
                 Self {
+                    language,
                     profiles,
                     accounts,
                     active_profile,
@@ -190,6 +258,7 @@ impl App {
                 }
             }
             Err(error) => Self {
+                language,
                 profiles: Vec::new(),
                 accounts: Vec::new(),
                 active_profile: None,
@@ -235,6 +304,23 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::EscapePressed => iced::exit(),
+            Message::ToggleLanguage => {
+                self.language = match self.language {
+                    Language::Spanish => Language::English,
+                    Language::English => Language::Spanish,
+                };
+                if let Err(error) = save_language(self.language) {
+                    self.message = Some(format!(
+                        "{}: {error}",
+                        tr(
+                            self.language,
+                            "No se pudo guardar la preferencia de idioma",
+                            "Could not save language preference"
+                        )
+                    ));
+                }
+                Task::none()
+            }
             Message::Activate(id) if !self.busy => {
                 let Some(profile) = self
                     .profiles
@@ -247,12 +333,17 @@ impl App {
                 let previous = self.active_profile.clone();
                 self.selected_profile = Some(id);
                 self.previous_profile = previous.clone();
-                self.message = Some(format!("Activando {}…", profile.name));
+                self.message = Some(format!(
+                    "{} {}…",
+                    tr(self.language, "Activando", "Activating"),
+                    profile.name
+                ));
                 self.login_command = None;
                 self.login_needed = false;
                 self.busy = true;
+                let language = self.language;
                 Task::perform(
-                    async move { activate_profile(profile, previous) },
+                    async move { activate_profile(profile, previous, language) },
                     Message::SwitchFinished,
                 )
             }
@@ -287,14 +378,19 @@ impl App {
                         .any(|account| account.login.eq_ignore_ascii_case(login))
                 });
                 let gh_login = profile.gh_login.clone();
+                let language = self.language;
                 Task::perform(
-                    async move { start_gh_login(gh_login.as_deref(), refresh) },
+                    async move { start_gh_login(gh_login.as_deref(), refresh, language) },
                     Message::LoginStarted,
                 )
             }
             Message::LoginStarted(message) => {
                 self.message = Some(message);
-                self.login_command = Some("Tras completar la autenticación, vuelve a activar el perfil para actualizar el estado.".into());
+                self.login_command = Some(tr(
+                    self.language,
+                    "Tras completar la autenticación, vuelve a activar el perfil para actualizar el estado.",
+                    "After signing in, activate the profile again to refresh its status.",
+                ).into());
                 self.login_needed = false;
                 Task::none()
             }
@@ -337,9 +433,13 @@ impl App {
                     .map(|home| home.join(".ssh"))
                     .filter(|path| path.is_dir());
                 let title = if self.form_key_mode == KeyMode::Create {
-                    "Crear clave SSH"
+                    tr(self.language, "Crear clave SSH", "Create SSH key")
                 } else {
-                    "Seleccionar clave SSH privada"
+                    tr(
+                        self.language,
+                        "Seleccionar clave SSH privada",
+                        "Select SSH private key",
+                    )
                 };
                 let dialog = if let Some(directory) = directory {
                     AsyncFileDialog::new()
@@ -383,16 +483,36 @@ impl App {
                 let key_path = expand_home(self.form_key_path.trim());
                 let key_mode = self.form_key_mode;
                 if name.is_empty() {
-                    self.form_error = Some("Escribe un nombre para la cuenta.".into());
+                    self.form_error = Some(
+                        tr(
+                            self.language,
+                            "Escribe un nombre para la cuenta.",
+                            "Enter a name for the account.",
+                        )
+                        .into(),
+                    );
                     return Task::none();
                 }
                 if login.is_empty() || login.chars().any(char::is_whitespace) {
-                    self.form_error =
-                        Some("Escribe un login de GitHub válido, sin espacios.".into());
+                    self.form_error = Some(
+                        tr(
+                            self.language,
+                            "Escribe un login de GitHub válido, sin espacios.",
+                            "Enter a valid GitHub username without spaces.",
+                        )
+                        .into(),
+                    );
                     return Task::none();
                 }
                 if self.form_key_path.trim().is_empty() {
-                    self.form_error = Some("Elige la ruta de la clave SSH.".into());
+                    self.form_error = Some(
+                        tr(
+                            self.language,
+                            "Elige la ruta de la clave SSH.",
+                            "Choose the SSH key path.",
+                        )
+                        .into(),
+                    );
                     return Task::none();
                 }
                 if self.profiles.iter().any(|profile| {
@@ -402,14 +522,21 @@ impl App {
                             .as_deref()
                             .is_some_and(|existing| existing.eq_ignore_ascii_case(&login))
                 }) {
-                    self.form_error =
-                        Some("Ya existe un perfil con ese nombre o login de GitHub.".into());
+                    self.form_error = Some(
+                        tr(
+                            self.language,
+                            "Ya existe un perfil con ese nombre o login de GitHub.",
+                            "A profile with that name or GitHub username already exists.",
+                        )
+                        .into(),
+                    );
                     return Task::none();
                 }
                 self.busy = true;
                 self.form_error = None;
+                let language = self.language;
                 Task::perform(
-                    async move { register_account(name, login, key_path, key_mode) },
+                    async move { register_account(name, login, key_path, key_mode, language) },
                     Message::AccountSaved,
                 )
             }
@@ -446,10 +573,19 @@ impl App {
 
     fn selector_view(&self) -> Element<'_, Message> {
         let mut content = column![
-            row![brand_logo(), text("Selector Git").size(14).color(INK),]
-                .spacing(12)
-                .align_y(Alignment::Center),
-            text("PERFILES").size(11).color(MUTED),
+            row![
+                brand_logo(),
+                text(tr(self.language, "Selector Git", "Git account switcher"))
+                    .size(14)
+                    .color(INK),
+                Space::new().width(Length::Fill),
+                language_button(self.language),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            text(tr(self.language, "PERFILES", "PROFILES"))
+                .size(11)
+                .color(MUTED),
         ]
         .spacing(10)
         .width(Length::Fill);
@@ -459,7 +595,7 @@ impl App {
         }
         if self.profiles.is_empty() {
             content = content.push(info_panel(
-                "No hay cuentas guardadas todavía. Pulsa «Añadir cuenta» para crear el primer perfil.",
+                tr(self.language, "No hay cuentas guardadas todavía. Pulsa «Añadir cuenta» para crear el primer perfil.", "No accounts saved yet. Choose “Add account” to create your first profile."),
                 false,
             ));
         } else {
@@ -467,14 +603,15 @@ impl App {
                 content = content.push(profile_card(
                     profile,
                     self.active_profile.as_deref() == Some(profile.id.as_str()),
-                    account_status(profile, &self.accounts),
+                    account_status(profile, &self.accounts, self.language),
                     self.busy,
+                    self.language,
                 ));
             }
         }
 
         content = content.push(
-            button("+ Añadir cuenta")
+            button(tr(self.language, "+ Añadir cuenta", "+ Add account"))
                 .width(Length::Fill)
                 .style(button::primary)
                 .on_press_maybe((!self.busy).then_some(Message::OpenAddAccount)),
@@ -482,11 +619,27 @@ impl App {
         content = content.push(
             container(
                 column![
-                    text("Autoría de commits").size(13).color(BLUE),
-                    text("Se conserva por directorio según includeIf.")
-                        .size(12)
-                        .color(BLUE),
-                    text("SSH y gh cambian globalmente.").size(12).color(BLUE),
+                    text(tr(
+                        self.language,
+                        "Autoría de commits",
+                        "Commit author identity"
+                    ))
+                    .size(13)
+                    .color(BLUE),
+                    text(tr(
+                        self.language,
+                        "Se conserva por directorio según includeIf.",
+                        "Remains directory-specific through includeIf."
+                    ))
+                    .size(12)
+                    .color(BLUE),
+                    text(tr(
+                        self.language,
+                        "SSH y gh cambian globalmente.",
+                        "SSH and gh switch globally."
+                    ))
+                    .size(12)
+                    .color(BLUE),
                 ]
                 .spacing(6),
             )
@@ -504,7 +657,7 @@ impl App {
         }
         if self.login_needed {
             content = content.push(
-                button("Iniciar sesión en gh")
+                button(tr(self.language, "Iniciar sesión en gh", "Sign in to gh"))
                     .style(button::primary)
                     .on_press(Message::StartLogin),
             );
@@ -520,17 +673,25 @@ impl App {
             {
                 if self.active_profile.as_deref() != Some(previous.id.as_str()) {
                     content = content.push(
-                        button(text(format!("Volver a {}", previous.name)))
-                            .style(button::secondary)
-                            .on_press(Message::Activate(previous.id.clone())),
+                        button(text(format!(
+                            "{} {}",
+                            tr(self.language, "Volver a", "Switch back to"),
+                            previous.name
+                        )))
+                        .style(button::secondary)
+                        .on_press(Message::Activate(previous.id.clone())),
                     );
                 }
             }
         }
         content = content.push(
-            text("Tab recorre · Enter activa · Esc cierra")
-                .size(10)
-                .color(MUTED),
+            text(tr(
+                self.language,
+                "Tab recorre · Enter activa · Esc cierra",
+                "Tab navigates · Enter selects · Esc closes",
+            ))
+            .size(10)
+            .color(MUTED),
         );
 
         container(app_scrollable(content.spacing(8).align_x(Alignment::Start)))
@@ -551,51 +712,85 @@ impl App {
 
     fn add_account_view(&self) -> Element<'_, Message> {
         let key_mode_buttons = row![
-            button("Usar clave existente")
-                .style(if self.form_key_mode == KeyMode::Existing {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::FormKeyModeChanged(KeyMode::Existing)),
-            button("Crear clave Ed25519")
-                .style(if self.form_key_mode == KeyMode::Create {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::FormKeyModeChanged(KeyMode::Create)),
+            button(tr(
+                self.language,
+                "Usar clave existente",
+                "Use existing key"
+            ))
+            .style(if self.form_key_mode == KeyMode::Existing {
+                button::primary
+            } else {
+                button::secondary
+            })
+            .on_press(Message::FormKeyModeChanged(KeyMode::Existing)),
+            button(tr(
+                self.language,
+                "Crear clave Ed25519",
+                "Create Ed25519 key"
+            ))
+            .style(if self.form_key_mode == KeyMode::Create {
+                button::primary
+            } else {
+                button::secondary
+            })
+            .on_press(Message::FormKeyModeChanged(KeyMode::Create)),
         ]
         .spacing(10);
 
         let mut form = column![
             row![
                 brand_logo(),
+                language_button(self.language),
                 Space::new().width(Length::Fill),
-                button("VOLVER AL SELECTOR")
+                button(tr(self.language, "VOLVER AL SELECTOR", "BACK TO PROFILES"))
                     .style(button::text)
                     .on_press(Message::CancelAddAccount),
             ]
             .align_y(Alignment::Center),
-            text("NUEVA CUENTA").size(11).color(MUTED),
-            text("Añadir cuenta").size(24).color(INK),
-            text("Guarda los datos del perfil para elegirlo desde el selector.")
-                .size(14)
+            text(tr(self.language, "NUEVA CUENTA", "NEW ACCOUNT"))
+                .size(11)
                 .color(MUTED),
-            text("NOMBRE VISIBLE").size(11).color(MUTED),
-            text_input("Ej. Personal", &self.form_name)
-                .on_input(Message::FormNameChanged)
-                .padding(12)
-                .size(14),
-            text("LOGIN DE GITHUB (gh)").size(11).color(MUTED),
-            text_input("usuario", &self.form_login)
+            text(tr(self.language, "Añadir cuenta", "Add account"))
+                .size(24)
+                .color(INK),
+            text(tr(
+                self.language,
+                "Guarda los datos del perfil para elegirlo desde el selector.",
+                "Save the profile details so you can select it from the switcher."
+            ))
+            .size(14)
+            .color(MUTED),
+            text(tr(self.language, "NOMBRE VISIBLE", "DISPLAY NAME"))
+                .size(11)
+                .color(MUTED),
+            text_input(
+                tr(self.language, "Ej. Personal", "e.g. Personal"),
+                &self.form_name
+            )
+            .on_input(Message::FormNameChanged)
+            .padding(12)
+            .size(14),
+            text(tr(
+                self.language,
+                "LOGIN DE GITHUB (gh)",
+                "GITHUB USERNAME (gh)"
+            ))
+            .size(11)
+            .color(MUTED),
+            text_input(tr(self.language, "usuario", "username"), &self.form_login)
                 .on_input(Message::FormLoginChanged)
                 .padding(12)
                 .size(14),
-            text("Se usa el login de la cuenta; no se guardan credenciales de gh.")
-                .size(12)
+            text(tr(
+                self.language,
+                "Se usa el login de la cuenta; no se guardan credenciales de gh.",
+                "The account username is used; gh credentials are not stored here."
+            ))
+            .size(12)
+            .color(MUTED),
+            text(tr(self.language, "CLAVE SSH PRIVADA", "SSH PRIVATE KEY"))
+                .size(11)
                 .color(MUTED),
-            text("CLAVE SSH PRIVADA").size(11).color(MUTED),
             key_mode_buttons,
             row![
                 text_input(
@@ -611,9 +806,9 @@ impl App {
                 .size(14)
                 .width(Length::Fill),
                 button(if self.form_key_mode == KeyMode::Create {
-                    "Elegir ubicación"
+                    tr(self.language, "Elegir ubicación", "Choose location")
                 } else {
-                    "Elegir archivo"
+                    tr(self.language, "Elegir archivo", "Choose file")
                 })
                 .style(button::secondary)
                 .on_press(Message::PickKeyPath),
@@ -625,13 +820,21 @@ impl App {
         .width(Length::Fill);
 
         let key_help = if self.form_key_mode == KeyMode::Create {
-            "Qui crea la clave localmente con ssh-keygen en Kitty. Introduce allí la frase de paso; la clave privada nunca se lee ni se muestra."
+            tr(
+                self.language,
+                "Qui crea la clave localmente con ssh-keygen en Kitty. Introduce allí la frase de paso; la clave privada nunca se lee ni se muestra.",
+                "Qui creates the key locally with ssh-keygen in Kitty. Enter the passphrase there; the private key is never read or displayed.",
+            )
         } else {
-            "Elige el archivo privado existente. Qui no lo lee ni muestra; se requiere su archivo público .pub para poder copiarlo a GitHub."
+            tr(
+                self.language,
+                "Elige el archivo privado existente. Qui no lo lee ni muestra; se requiere su archivo público .pub para poder copiarlo a GitHub.",
+                "Choose an existing private key. Qui never reads or displays it; its .pub file is needed to copy the public key to GitHub.",
+            )
         };
         form = form.push(text(key_help).size(12).color(MUTED));
         form = form.push(info_panel(
-            "gh y SSH cambian globalmente. La autoría Git sigue por directorio según includeIf.",
+            tr(self.language, "gh y SSH cambian globalmente. La autoría Git sigue por directorio según includeIf.", "gh and SSH switch globally. Git commit identity remains directory-specific through includeIf."),
             false,
         ));
         if let Some(error) = &self.form_error {
@@ -640,13 +843,13 @@ impl App {
         form = form.push(
             row![
                 Space::new().width(Length::Fill),
-                button("Cancelar")
+                button(tr(self.language, "Cancelar", "Cancel"))
                     .style(button::secondary)
                     .on_press(Message::CancelAddAccount),
                 button(if self.busy {
-                    "Guardando…"
+                    tr(self.language, "Guardando…", "Saving…")
                 } else {
-                    "Guardar cuenta"
+                    tr(self.language, "Guardar cuenta", "Save account")
                 })
                 .style(button::primary)
                 .on_press_maybe((!self.busy).then_some(Message::SaveAccount)),
@@ -676,18 +879,19 @@ impl App {
         let mut content = column![
             row![
                 brand_logo(),
+                language_button(self.language),
                 Space::new().width(Length::Fill),
-                button("VOLVER AL SELECTOR")
+                button(tr(self.language, "VOLVER AL SELECTOR", "BACK TO PROFILES"))
                     .style(button::text)
                     .on_press(Message::CancelAddAccount),
             ]
             .align_y(Alignment::Center),
-            text("PERFIL GUARDADO").size(11).color(MUTED),
-            text("Clave pública lista").size(24).color(INK),
-            text("Copia la línea completa y pégala en GitHub.")
+            text(tr(self.language, "PERFIL GUARDADO", "PROFILE SAVED")).size(11).color(MUTED),
+            text(tr(self.language, "Clave pública lista", "Public key ready")).size(24).color(INK),
+            text(tr(self.language, "Copia la línea completa y pégala en GitHub.", "Copy the full line and add it to GitHub."))
                 .size(14)
                 .color(MUTED),
-            text("CLAVE PÚBLICA (.PUB)").size(11).color(MUTED),
+            text(tr(self.language, "CLAVE PÚBLICA (.PUB)", "PUBLIC KEY (.PUB)")).size(11).color(MUTED),
             text_input("~/.ssh/qui_ed25519.pub", &path).padding(12).size(14),
             container(app_scrollable(
                 text(&self.public_key).size(12).color(INK),
@@ -701,14 +905,14 @@ impl App {
                     ..Default::default()
                 }),
             button(if self.copied_public_key {
-                "Copiada"
+                tr(self.language, "Copiada", "Copied")
             } else {
-                "Copiar clave pública"
+                tr(self.language, "Copiar clave pública", "Copy public key")
             })
             .style(button::primary)
             .on_press(Message::CopyPublicKey),
             info_panel(
-                "Pégala en GitHub → Settings → SSH and GPG keys → New SSH key. La clave privada nunca se muestra ni se copia.",
+                tr(self.language, "Pégala en GitHub → Settings → SSH and GPG keys → New SSH key. La clave privada nunca se muestra ni se copia.", "Add it on GitHub under Settings → SSH and GPG keys → New SSH key. Your private key is never displayed or copied."),
                 false,
             ),
         ]
@@ -716,7 +920,7 @@ impl App {
         .width(Length::Fill);
         if self.public_key.is_empty() {
             content = content.push(info_panel(
-                "No se pudo leer la clave pública. Comprueba que existe el archivo .pub junto a la clave privada.",
+                tr(self.language, "No se pudo leer la clave pública. Comprueba que existe el archivo .pub junto a la clave privada.", "Could not read the public key. Check that the .pub file exists next to the private key."),
                 true,
             ));
         }
@@ -738,6 +942,7 @@ fn profile_card<'a>(
     active: bool,
     gh_status: String,
     busy: bool,
+    language: Language,
 ) -> Element<'a, Message> {
     let body = column![
         row![
@@ -749,21 +954,25 @@ fn profile_card<'a>(
                 })
                 .color(INK),
             Space::new().width(Length::Fill),
-            text(if active { "ACTIVA" } else { "" })
-                .size(10)
-                .color(BLUE),
+            text(if active {
+                tr(language, "ACTIVA", "ACTIVE")
+            } else {
+                ""
+            })
+            .size(10)
+            .color(BLUE),
         ]
         .align_y(Alignment::Center),
         text(format!("SSH · {}", profile.name))
             .size(12)
             .color(MUTED),
-        text(format!("gh · {gh_status}"))
-            .size(12)
-            .color(if gh_status.contains("no válido") {
+        text(format!("gh · {gh_status}")).size(12).color(
+            if gh_status.contains("no válido") || gh_status.contains("invalid token") {
                 ERROR
             } else {
                 MUTED
-            }),
+            }
+        ),
     ]
     .spacing(2)
     .width(Length::Fill);
@@ -790,6 +999,16 @@ fn profile_card<'a>(
         })
         .on_press_maybe((!busy).then(|| Message::Activate(profile.id.clone())))
         .into()
+}
+
+fn language_button(language: Language) -> Element<'static, Message> {
+    button(match language {
+        Language::Spanish => "English",
+        Language::English => "Español",
+    })
+    .style(button::text)
+    .on_press(Message::ToggleLanguage)
+    .into()
 }
 
 fn info_panel(message: impl Into<String>, error: bool) -> Element<'static, Message> {
@@ -842,7 +1061,7 @@ fn app_scrollable<'a>(
         })
 }
 
-fn load_profiles() -> Result<Vec<Profile>, String> {
+fn load_profiles(language: Language) -> Result<Vec<Profile>, String> {
     let output = Command::new("git")
         .args([
             "config",
@@ -851,10 +1070,20 @@ fn load_profiles() -> Result<Vec<Profile>, String> {
             r"^includeif\..*\.path$",
         ])
         .output()
-        .map_err(|error| format!("No pude ejecutar git: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                tr(language, "No pude ejecutar git", "Could not run git")
+            )
+        })?;
     if !output.status.success() && output.status.code() != Some(1) {
         return Err(format!(
-            "No pude leer las reglas includeIf de Git: {}",
+            "{}: {}",
+            tr(
+                language,
+                "No pude leer las reglas includeIf de Git",
+                "Could not read Git includeIf rules"
+            ),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -876,8 +1105,8 @@ fn load_profiles() -> Result<Vec<Profile>, String> {
             continue;
         };
         let config_path = expand_home(config_path);
-        let user_name = git_config_value(&config_path, "user.name")?;
-        let email = git_config_value(&config_path, "user.email")?;
+        let user_name = git_config_value(&config_path, "user.name", language)?;
+        let email = git_config_value(&config_path, "user.email", language)?;
         let Some(host_index) = ssh_hosts
             .iter()
             .position(|host| host.host.to_lowercase().contains(profile_id))
@@ -888,7 +1117,7 @@ fn load_profiles() -> Result<Vec<Profile>, String> {
         profiles.push(Profile {
             id: profile_id.into(),
             name: if profile_id == "work" {
-                "Trabajo"
+                tr(language, "Trabajo", "Work")
             } else {
                 "Personal"
             }
@@ -903,8 +1132,13 @@ fn load_profiles() -> Result<Vec<Profile>, String> {
     if let Some(path) = profiles_file() {
         match fs::read(&path) {
             Ok(contents) => {
-                let saved: Vec<Profile> = serde_json::from_slice(&contents)
-                    .map_err(|error| format!("No pude leer {}: {error}", path.display()))?;
+                let saved: Vec<Profile> = serde_json::from_slice(&contents).map_err(|error| {
+                    format!(
+                        "{} {}: {error}",
+                        tr(language, "No pude leer", "Could not read"),
+                        path.display()
+                    )
+                })?;
                 for profile in saved {
                     if profile.id.starts_with("account-")
                         && profile.gh_login.is_some()
@@ -916,7 +1150,11 @@ fn load_profiles() -> Result<Vec<Profile>, String> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(format!("No pude leer {}: {error}", path.display()));
+                return Err(format!(
+                    "{} {}: {error}",
+                    tr(language, "No pude leer", "Could not read"),
+                    path.display()
+                ));
             }
         }
     }
@@ -936,25 +1174,63 @@ fn profiles_file() -> Option<PathBuf> {
     config_dir().map(|path| path.join("profiles.json"))
 }
 
-fn save_profile(profile: &Profile) -> Result<(), String> {
-    let config = config_dir().ok_or("No encuentro tu directorio de configuración.")?;
+fn save_profile(profile: &Profile, language: Language) -> Result<(), String> {
+    let config = config_dir().ok_or(tr(
+        language,
+        "No encuentro tu directorio de configuración.",
+        "Could not find your configuration directory.",
+    ))?;
     let path = config.join("profiles.json");
-    fs::create_dir_all(&config)
-        .map_err(|error| format!("No pude crear {}: {error}", config.display()))?;
+    fs::create_dir_all(&config).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(language, "No pude crear", "Could not create"),
+            config.display()
+        )
+    })?;
     let mut saved = match fs::read(&path) {
-        Ok(contents) => serde_json::from_slice::<Vec<Profile>>(&contents)
-            .map_err(|error| format!("No pude leer {}: {error}", path.display()))?,
+        Ok(contents) => serde_json::from_slice::<Vec<Profile>>(&contents).map_err(|error| {
+            format!(
+                "{} {}: {error}",
+                tr(language, "No pude leer", "Could not read"),
+                path.display()
+            )
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(format!("No pude leer {}: {error}", path.display())),
+        Err(error) => {
+            return Err(format!(
+                "{} {}: {error}",
+                tr(language, "No pude leer", "Could not read"),
+                path.display()
+            ));
+        }
     };
     if saved.iter().any(|existing| existing.id == profile.id) {
-        return Err("Ya existe un perfil con ese identificador.".into());
+        return Err(tr(
+            language,
+            "Ya existe un perfil con ese identificador.",
+            "A profile with that identifier already exists.",
+        )
+        .into());
     }
     saved.push(profile.clone());
-    let contents = serde_json::to_vec_pretty(&saved)
-        .map_err(|error| format!("No pude guardar el perfil: {error}"))?;
-    atomic_write(&path, &contents)
-        .map_err(|error| format!("No pude guardar {}: {error}", path.display()))
+    let contents = serde_json::to_vec_pretty(&saved).map_err(|error| {
+        format!(
+            "{}: {error}",
+            tr(
+                language,
+                "No pude guardar el perfil",
+                "Could not serialize the profile"
+            )
+        )
+    })?;
+    atomic_write(&path, &contents).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(language, "No pude guardar", "Could not save"),
+            path.display()
+        )
+    })
 }
 
 fn register_account(
@@ -962,39 +1238,77 @@ fn register_account(
     login: String,
     key_path: PathBuf,
     key_mode: KeyMode,
+    language: Language,
 ) -> Result<AccountSaved, String> {
     if key_mode == KeyMode::Create {
         if key_path.exists() || public_key_path(&key_path).exists() {
             return Err(format!(
-                "Ya existe un archivo en {}. Elige otra ruta para no sobrescribir una clave.",
-                key_path.display()
+                "{} {}. {}.",
+                tr(
+                    language,
+                    "Ya existe un archivo en",
+                    "A file already exists at"
+                ),
+                key_path.display(),
+                tr(
+                    language,
+                    "Elige otra ruta para no sobrescribir una clave",
+                    "Choose another path to avoid overwriting a key"
+                )
             ));
         }
         let parent = key_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
-            .ok_or("Elige una ruta válida para la clave.")?;
+            .ok_or(tr(
+                language,
+                "Elige una ruta válida para la clave.",
+                "Choose a valid key path.",
+            ))?;
         let parent_missing = !parent.exists();
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("No pude crear {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "{} {}: {error}",
+                tr(language, "No pude crear", "Could not create"),
+                parent.display()
+            )
+        })?;
         #[cfg(unix)]
         if parent_missing {
             if let Err(error) = set_private_directory_permissions(parent) {
-                return Err(format!("No pude proteger {}: {error}", parent.display()));
+                return Err(format!(
+                    "{} {}: {error}",
+                    tr(language, "No pude proteger", "Could not secure"),
+                    parent.display()
+                ));
             }
         }
-        run_ssh_keygen(&key_path, &login)?;
+        run_ssh_keygen(&key_path, &login, language)?;
     } else {
         if !key_path.is_file() || key_path.extension().is_some_and(|ext| ext == "pub") {
-            return Err("Selecciona un archivo de clave privada SSH existente.".into());
+            return Err(tr(
+                language,
+                "Selecciona un archivo de clave privada SSH existente.",
+                "Select an existing SSH private key file.",
+            )
+            .into());
         }
     }
 
     let public_path = public_key_path(&key_path);
-    let public_key = read_public_key(&public_path)?;
+    let public_key = read_public_key(&public_path, language)?;
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("No pude crear el identificador del perfil: {error}"))?
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                tr(
+                    language,
+                    "No pude crear el identificador del perfil",
+                    "Could not create a profile identifier"
+                )
+            )
+        })?
         .as_nanos();
     let profile = Profile {
         id: format!("account-{unique}"),
@@ -1004,7 +1318,7 @@ fn register_account(
         ssh_identity: key_path,
         gh_login: Some(login),
     };
-    save_profile(&profile)?;
+    save_profile(&profile, language)?;
     Ok(AccountSaved {
         profile,
         public_key_path: public_path,
@@ -1018,9 +1332,18 @@ fn public_key_path(private_key_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn read_public_key(path: &Path) -> Result<String, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("No pude leer la clave pública {}: {error}", path.display()))?;
+fn read_public_key(path: &Path, language: Language) -> Result<String, String> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(
+                language,
+                "No pude leer la clave pública",
+                "Could not read public key"
+            ),
+            path.display()
+        )
+    })?;
     let public_key = contents.trim();
     let valid = public_key.lines().count() == 1
         && public_key.split_whitespace().count() >= 2
@@ -1029,14 +1352,19 @@ fn read_public_key(path: &Path) -> Result<String, String> {
             || public_key.starts_with("sk-"));
     if !valid {
         return Err(format!(
-            "{} no parece una clave pública SSH válida.",
-            path.display()
+            "{} {}",
+            path.display(),
+            tr(
+                language,
+                "no parece una clave pública SSH válida.",
+                "does not look like a valid SSH public key."
+            )
         ));
     }
     Ok(public_key.to_owned())
 }
 
-fn run_ssh_keygen(path: &Path, comment: &str) -> Result<(), String> {
+fn run_ssh_keygen(path: &Path, comment: &str, language: Language) -> Result<(), String> {
     let mut command = Command::new("kitty");
     command
         .args([
@@ -1057,18 +1385,35 @@ fn run_ssh_keygen(path: &Path, comment: &str) -> Result<(), String> {
                 .arg(path);
             fallback.spawn().map_err(|error| {
                 format!(
-                    "No pude abrir Kitty ni un emulador de terminal para crear la clave: {error}"
+                    "{}: {error}",
+                    tr(
+                        language,
+                        "No pude abrir Kitty ni un emulador de terminal para crear la clave",
+                        "Could not open Kitty or a terminal emulator to create the key"
+                    )
                 )
             })?
         }
     };
-    let status = child
-        .wait()
-        .map_err(|error| format!("No pude esperar a ssh-keygen: {error}"))?;
+    let status = child.wait().map_err(|error| {
+        format!(
+            "{}: {error}",
+            tr(
+                language,
+                "No pude esperar a ssh-keygen",
+                "Could not wait for ssh-keygen"
+            )
+        )
+    })?;
     if status.success() {
         Ok(())
     } else {
-        Err("No se creó la clave SSH. Revisa Kitty y vuelve a intentarlo.".into())
+        Err(tr(
+            language,
+            "No se creó la clave SSH. Revisa Kitty y vuelve a intentarlo.",
+            "The SSH key was not created. Check Kitty and try again.",
+        )
+        .into())
     }
 }
 
@@ -1078,16 +1423,26 @@ fn set_private_directory_permissions(path: &Path) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-fn git_config_value(path: &Path, key: &str) -> Result<String, String> {
+fn git_config_value(path: &Path, key: &str, language: Language) -> Result<String, String> {
     let output = Command::new("git")
         .args(["config", "--file"])
         .arg(path)
         .arg("--get")
         .arg(key)
         .output()
-        .map_err(|error| format!("No pude leer {}: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "{} {}: {error}",
+                tr(language, "No pude leer", "Could not read"),
+                path.display()
+            )
+        })?;
     if !output.status.success() {
-        return Err(format!("Falta {key} en {}.", path.display()));
+        return Err(format!(
+            "{} {key} {}.",
+            tr(language, "Falta", "Missing"),
+            path.display()
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -1194,18 +1549,18 @@ fn map_gh_accounts(profiles: &mut [Profile], accounts: &[GhAccount]) {
     }
 }
 
-fn account_status(profile: &Profile, accounts: &[GhAccount]) -> String {
+fn account_status(profile: &Profile, accounts: &[GhAccount], language: Language) -> String {
     let Some(login) = profile.gh_login.as_deref() else {
-        return "sin iniciar sesión".into();
+        return tr(language, "sin iniciar sesión", "not signed in").into();
     };
     let Some(account) = accounts
         .iter()
         .find(|account| account.login.eq_ignore_ascii_case(login))
     else {
-        return "sin iniciar sesión".into();
+        return tr(language, "sin iniciar sesión", "not signed in").into();
     };
     if account.state == "success" && account.error.is_none() {
-        "sesión válida".into()
+        tr(language, "sesión válida", "signed in").into()
     } else if account.error.as_deref().is_some_and(|error| {
         let error = error.to_lowercase();
         error.contains("invalid")
@@ -1213,9 +1568,9 @@ fn account_status(profile: &Profile, accounts: &[GhAccount]) -> String {
             || error.contains("401")
             || error.contains("403")
     }) {
-        "token no válido".into()
+        tr(language, "token no válido", "invalid token").into()
     } else {
-        "no se pudo verificar".into()
+        tr(language, "no se pudo verificar", "could not verify").into()
     }
 }
 
@@ -1242,8 +1597,12 @@ fn read_active_profile(profiles: &[Profile], accounts: &[GhAccount]) -> Option<S
         })
 }
 
-fn activate_profile(profile: Profile, previous_profile: Option<String>) -> SwitchOutcome {
-    let ssh_result = install_ssh_rewrite(&profile);
+fn activate_profile(
+    profile: Profile,
+    previous_profile: Option<String>,
+    language: Language,
+) -> SwitchOutcome {
+    let ssh_result = install_ssh_rewrite(&profile, language);
     let ssh_changed = ssh_result.is_ok();
     let (message, login_needed, accounts) = match ssh_result {
         Ok(()) => {
@@ -1260,27 +1619,50 @@ fn activate_profile(profile: Profile, previous_profile: Option<String>) -> Switc
                     .output()
             });
             let accounts = load_gh_accounts();
-            let status = account_status(&profile, &accounts);
+            let status = account_status(&profile, &accounts, language);
             let gh_switched = matches!(&gh_result, Some(Ok(output)) if output.status.success());
-            let login_needed = !gh_switched || status != "sesión válida";
+            let login_needed = !gh_switched || status != tr(language, "sesión válida", "signed in");
             let message = match gh_result {
                 Some(Ok(output)) if output.status.success() => {
                     format!(
-                        "SSH y gh seleccionados para {}. Estado de gh: {}.",
-                        profile.name, status
+                        "{} {}. {}: {}.",
+                        tr(
+                            language,
+                            "SSH y gh seleccionados para",
+                            "SSH and gh switched to"
+                        ),
+                        profile.name,
+                        tr(language, "Estado de gh", "gh status"),
+                        status
                     )
                 }
                 Some(Err(error)) => format!(
-                    "SSH cambiado a {}. No pude ejecutar gh: {error}",
-                    profile.name
+                    "{} {}. {}: {error}",
+                    tr(language, "SSH cambiado a", "SSH switched to"),
+                    profile.name,
+                    tr(language, "No pude ejecutar gh", "Could not run gh")
                 ),
                 Some(Ok(_)) => format!(
-                    "SSH cambiado a {}. gh no pudo cambiar de cuenta; estado: {}.",
-                    profile.name, status
+                    "{} {}. {}: {}.",
+                    tr(language, "SSH cambiado a", "SSH switched to"),
+                    profile.name,
+                    tr(
+                        language,
+                        "gh no pudo cambiar de cuenta; estado",
+                        "gh could not switch accounts; status"
+                    ),
+                    status
                 ),
                 None => format!(
-                    "SSH cambiado a {}. gh no tiene una cuenta asociada; estado: {}.",
-                    profile.name, status
+                    "{} {}. {}: {}.",
+                    tr(language, "SSH cambiado a", "SSH switched to"),
+                    profile.name,
+                    tr(
+                        language,
+                        "gh no tiene una cuenta asociada; estado",
+                        "no gh account is associated; status"
+                    ),
+                    status
                 ),
             };
             (message, login_needed, accounts)
@@ -1297,23 +1679,41 @@ fn activate_profile(profile: Profile, previous_profile: Option<String>) -> Switc
     }
 }
 
-fn install_ssh_rewrite(profile: &Profile) -> Result<(), String> {
-    let config_dir = config_dir().ok_or("No encuentro tu directorio de configuración.")?;
+fn install_ssh_rewrite(profile: &Profile, language: Language) -> Result<(), String> {
+    let config_dir = config_dir().ok_or(tr(
+        language,
+        "No encuentro tu directorio de configuración.",
+        "Could not find your configuration directory.",
+    ))?;
     let git_file = config_dir.join("ssh-profile.gitconfig");
     let ssh_file = config_dir.join("ssh-profile.conf");
     let ssh_config = home_dir()
-        .ok_or("No encuentro tu directorio personal.")?
+        .ok_or(tr(
+            language,
+            "No encuentro tu directorio personal.",
+            "Could not find your home directory.",
+        ))?
         .join(".ssh/config");
-    fs::create_dir_all(&config_dir)
-        .map_err(|error| format!("No pude crear {}: {error}", config_dir.display()))?;
+    fs::create_dir_all(&config_dir).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(language, "No pude crear", "Could not create"),
+            config_dir.display()
+        )
+    })?;
     if let Some(parent) = ssh_config.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("No pude crear {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "{} {}: {error}",
+                tr(language, "No pude crear", "Could not create"),
+                parent.display()
+            )
+        })?;
     }
 
-    let previous_git = read_optional_file(&git_file)?;
-    let previous_ssh = read_optional_file(&ssh_file)?;
-    let previous_ssh_config = read_optional_file(&ssh_config)?;
+    let previous_git = read_optional_file(&git_file, language)?;
+    let previous_ssh = read_optional_file(&ssh_file, language)?;
+    let previous_ssh_config = read_optional_file(&ssh_config, language)?;
     let mut prefixes = HashSet::new();
     for alias in read_ssh_aliases() {
         prefixes.insert(format!("git@{}:", alias.host));
@@ -1329,18 +1729,33 @@ fn install_ssh_rewrite(profile: &Profile) -> Result<(), String> {
         ssh_quote_path(&profile.ssh_identity)
     );
 
-    atomic_write(&ssh_file, ssh_content.as_bytes())
-        .map_err(|error| format!("No pude guardar la configuración SSH: {error}"))?;
-    if let Err(error) = ensure_ssh_include(&ssh_config, &ssh_file) {
+    atomic_write(&ssh_file, ssh_content.as_bytes()).map_err(|error| {
+        format!(
+            "{}: {error}",
+            tr(
+                language,
+                "No pude guardar la configuración SSH",
+                "Could not save SSH configuration"
+            )
+        )
+    })?;
+    if let Err(error) = ensure_ssh_include(&ssh_config, &ssh_file, language) {
         restore_file(&ssh_file, previous_ssh.as_deref());
         return Err(error);
     }
     if let Err(error) = atomic_write(&git_file, git_content.as_bytes()) {
         restore_file(&ssh_config, previous_ssh_config.as_deref());
         restore_file(&ssh_file, previous_ssh.as_deref());
-        return Err(format!("No pude guardar la configuración Git: {error}"));
+        return Err(format!(
+            "{}: {error}",
+            tr(
+                language,
+                "No pude guardar la configuración Git",
+                "Could not save Git configuration"
+            )
+        ));
     }
-    if let Err(error) = ensure_git_include(&git_file) {
+    if let Err(error) = ensure_git_include(&git_file, language) {
         restore_file(&ssh_config, previous_ssh_config.as_deref());
         restore_file(&ssh_file, previous_ssh.as_deref());
         restore_file(&git_file, previous_git.as_deref());
@@ -1349,16 +1764,20 @@ fn install_ssh_rewrite(profile: &Profile) -> Result<(), String> {
     Ok(())
 }
 
-fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+fn read_optional_file(path: &Path, language: Language) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("No pude leer {}: {error}", path.display())),
+        Err(error) => Err(format!(
+            "{} {}: {error}",
+            tr(language, "No pude leer", "Could not read"),
+            path.display()
+        )),
     }
 }
 
-fn ensure_ssh_include(config: &Path, included: &Path) -> Result<(), String> {
-    let existing = read_optional_file(config)?;
+fn ensure_ssh_include(config: &Path, included: &Path, language: Language) -> Result<(), String> {
+    let existing = read_optional_file(config, language)?;
     let current = existing
         .as_deref()
         .map(|contents| String::from_utf8_lossy(contents).into_owned())
@@ -1378,18 +1797,41 @@ fn ensure_ssh_include(config: &Path, included: &Path) -> Result<(), String> {
         return Ok(());
     }
     let updated = format!("Include {}\n{}", ssh_quote_path(included), current);
-    atomic_write(config, updated.as_bytes())
-        .map_err(|error| format!("No pude añadir el Include a {}: {error}", config.display()))
+    atomic_write(config, updated.as_bytes()).map_err(|error| {
+        format!(
+            "{} {}: {error}",
+            tr(
+                language,
+                "No pude añadir el Include a",
+                "Could not add the Include to"
+            ),
+            config.display()
+        )
+    })
 }
 
-fn ensure_git_include(config_file: &Path) -> Result<(), String> {
+fn ensure_git_include(config_file: &Path, language: Language) -> Result<(), String> {
     let include_paths = Command::new("git")
         .args(["config", "--global", "--get-all", "include.path"])
         .output()
-        .map_err(|error| format!("No pude ejecutar git config: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                tr(
+                    language,
+                    "No pude ejecutar git config",
+                    "Could not run git config"
+                )
+            )
+        })?;
     if !include_paths.status.success() && include_paths.status.code() != Some(1) {
         return Err(format!(
-            "No pude leer los include.path de Git: {}",
+            "{}: {}",
+            tr(
+                language,
+                "No pude leer los include.path de Git",
+                "Could not read Git include.path values"
+            ),
             String::from_utf8_lossy(&include_paths.stderr).trim()
         ));
     }
@@ -1404,12 +1846,26 @@ fn ensure_git_include(config_file: &Path) -> Result<(), String> {
         .args(["config", "--global", "--add", "include.path"])
         .arg(config_path)
         .output()
-        .map_err(|error| format!("No pude registrar la configuración Git: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                tr(
+                    language,
+                    "No pude registrar la configuración Git",
+                    "Could not register Git configuration"
+                )
+            )
+        })?;
     if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "No pude registrar la configuración Git: {}",
+            "{}: {}",
+            tr(
+                language,
+                "No pude registrar la configuración Git",
+                "Could not register Git configuration"
+            ),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
@@ -1432,7 +1888,7 @@ fn restore_file(path: &Path, previous: Option<&[u8]>) {
     }
 }
 
-fn start_gh_login(login: Option<&str>, refresh: bool) -> String {
+fn start_gh_login(login: Option<&str>, refresh: bool, language: Language) -> String {
     let (program, args): (&str, &[&str]) = if refresh {
         ("gh", &["auth", "refresh", "--hostname", "github.com"])
     } else {
@@ -1451,7 +1907,12 @@ fn start_gh_login(login: Option<&str>, refresh: bool) -> String {
     };
     if refresh {
         let Some(login) = login else {
-            return "No hay una cuenta de gh para renovar. Iníciala con gh auth login.".into();
+            return tr(
+                language,
+                "No hay una cuenta de gh para renovar. Iníciala con gh auth login.",
+                "There is no gh account to refresh. Sign in with gh auth login.",
+            )
+            .into();
         };
         let switched = Command::new("gh")
             .args([
@@ -1465,7 +1926,13 @@ fn start_gh_login(login: Option<&str>, refresh: bool) -> String {
             .status();
         if !switched.is_ok_and(|status| status.success()) {
             return format!(
-                "No pude seleccionar la cuenta {login}. Iníciala con `gh auth login --hostname github.com --git-protocol ssh --web`."
+                "{} {login}. {} `gh auth login --hostname github.com --git-protocol ssh --web`.",
+                tr(
+                    language,
+                    "No pude seleccionar la cuenta",
+                    "Could not select account"
+                ),
+                tr(language, "Iníciala con", "Sign in with")
             );
         }
     }
@@ -1474,14 +1941,14 @@ fn start_gh_login(login: Option<&str>, refresh: bool) -> String {
         .args(args)
         .spawn();
     if kitty.is_ok() {
-        return "Se abrió Kitty para autenticar gh. Al terminar, pulsa de nuevo el perfil para actualizar el estado.".into();
+        return tr(language, "Se abrió Kitty para autenticar gh. Al terminar, pulsa de nuevo el perfil para actualizar el estado.", "Kitty opened for gh sign-in. When it is done, select the profile again to refresh its status.").into();
     }
 
     let mut terminal = Command::new("x-terminal-emulator");
     terminal.arg("-e").arg(program).args(args);
     match terminal.spawn() {
-        Ok(_) => "Se abrió una terminal para autenticar gh. Al terminar, pulsa de nuevo el perfil para actualizar el estado.".into(),
-        Err(_) => format!("No encontré Kitty ni un emulador de terminal. Ejecuta en una terminal: gh {}", args.join(" ")),
+        Ok(_) => tr(language, "Se abrió una terminal para autenticar gh. Al terminar, pulsa de nuevo el perfil para actualizar el estado.", "A terminal opened for gh sign-in. When it is done, select the profile again to refresh its status.").into(),
+        Err(_) => format!("{}. `gh {}`", tr(language, "No encontré Kitty ni un emulador de terminal. Ejecuta en una terminal", "Kitty and no terminal emulator were found. Run this in a terminal"), args.join(" ")),
     }
 }
 
